@@ -8,7 +8,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 
-
 from system_tools import (
     get_system_status,
     get_top_processes,
@@ -112,6 +111,20 @@ from admin_tools import (
     power_action,
 )
 
+from ai_router import (
+    LUNA,
+    route_model,
+    router_status,
+    set_model_override,
+    get_model_override,
+)
+
+from cost_tracker import (
+    record_response,
+    get_cost_summary,
+    format_cost_summary,
+)
+
 
 # ============================================================
 # CONFIG
@@ -125,15 +138,50 @@ client = OpenAI(
     )
 )
 
-MODEL = "gpt-5.5"
-
 VOICE_RESPONSE_MAX_CHARS = 1200
 
 CONFIRMATION_TIMEOUT_SECONDS = 90
 
+PROMPT_CACHE_KEY = (
+    "jarvis-core-v3"
+)
+
 
 init_memory_db()
 init_scheduler_db()
+
+
+# ============================================================
+# TOOL HELPER
+# ============================================================
+
+def function_tool(
+    name,
+    description,
+    properties=None
+):
+    properties = (
+        properties
+        or {}
+    )
+
+    return {
+        "type": "function",
+        "name": name,
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties":
+                properties,
+            "required":
+                list(
+                    properties.keys()
+                ),
+            "additionalProperties":
+                False,
+        },
+        "strict": True,
+    }
 
 
 # ============================================================
@@ -143,7 +191,6 @@ init_scheduler_db()
 def analyze_screen(
     question
 ):
-
     capture = capture_screen()
 
     if not capture.get(
@@ -156,7 +203,6 @@ def analyze_screen(
     )
 
     try:
-
         with open(
             image_path,
             "rb"
@@ -172,25 +218,44 @@ def analyze_screen(
                 )
             )
 
+        route = route_model(
+            (
+                "Analyze a Windows screenshot. "
+                + str(question)
+            )
+        )
+
         response = (
             client.responses.create(
-                model=MODEL,
+                model=route[
+                    "model"
+                ],
+                reasoning={
+                    "effort":
+                        route[
+                            "effort"
+                        ]
+                },
+                prompt_cache_key=(
+                    PROMPT_CACHE_KEY
+                ),
                 input=[
                     {
-                        "role": "user",
+                        "role":
+                            "user",
                         "content": [
                             {
                                 "type":
                                     "input_text",
                                 "text": (
-                                    "Examine the user's "
-                                    "current Windows desktop "
-                                    "screenshot.\n"
+                                    "Examine this Windows "
+                                    "desktop screenshot. "
                                     "Only use information "
-                                    "actually visible.\n"
+                                    "actually visible. "
                                     "If locating something "
-                                    "clickable, give approximate "
-                                    "center pixel coordinates.\n\n"
+                                    "clickable, provide "
+                                    "approximate center "
+                                    "coordinates.\n\n"
                                     f"Question: {question}"
                                 ),
                             },
@@ -210,16 +275,23 @@ def analyze_screen(
             )
         )
 
+        record_response(
+            response,
+            route["model"],
+            purpose="screen_vision",
+        )
+
         return {
             "success": True,
             "analysis":
                 response.output_text,
+            "model":
+                route["display"],
             "screenshot":
                 str(image_path),
         }
 
     except Exception as e:
-
         return {
             "success": False,
             "error": str(e),
@@ -227,42 +299,14 @@ def analyze_screen(
 
 
 # ============================================================
-# TOOL HELPER
-# ============================================================
-
-def function_tool(
-    name,
-    description,
-    properties=None,
-    required=None
-):
-
-    return {
-        "type": "function",
-        "name": name,
-        "description": description,
-        "parameters": {
-            "type": "object",
-            "properties":
-                properties or {},
-            "required":
-                required or [],
-            "additionalProperties":
-                False,
-        },
-        "strict": True,
-    }
-
-
-# ============================================================
-# TOOLS
+# TOOL DEFINITIONS
 # ============================================================
 
 TOOLS = [
 
     function_tool(
         "get_system_status",
-        "Get current CPU, RAM and disk usage."
+        "Get CPU, RAM and disk usage."
     ),
 
     function_tool(
@@ -277,7 +321,7 @@ TOOLS = [
 
     function_tool(
         "get_screen_info",
-        "Get screen dimensions and cursor position."
+        "Get screen size and cursor position."
     ),
 
     function_tool(
@@ -288,9 +332,6 @@ TOOLS = [
                 "type": "string"
             }
         },
-        [
-            "question"
-        ],
     ),
 
     function_tool(
@@ -307,11 +348,6 @@ TOOLS = [
                 "type": "number"
             },
         },
-        [
-            "x",
-            "y",
-            "duration"
-        ],
     ),
 
     function_tool(
@@ -342,12 +378,6 @@ TOOLS = [
                 "type": "integer"
             },
         },
-        [
-            "x",
-            "y",
-            "button",
-            "clicks"
-        ],
     ),
 
     function_tool(
@@ -358,14 +388,11 @@ TOOLS = [
                 "type": "integer"
             }
         },
-        [
-            "amount"
-        ],
     ),
 
     function_tool(
         "type_text",
-        "Type text into the focused application.",
+        "Type text into the active application.",
         {
             "text": {
                 "type": "string"
@@ -374,10 +401,6 @@ TOOLS = [
                 "type": "number"
             },
         },
-        [
-            "text",
-            "interval"
-        ],
     ),
 
     function_tool(
@@ -391,10 +414,6 @@ TOOLS = [
                 "type": "integer"
             },
         },
-        [
-            "key",
-            "presses"
-        ],
     ),
 
     function_tool(
@@ -408,9 +427,6 @@ TOOLS = [
                 }
             }
         },
-        [
-            "keys"
-        ],
     ),
 
     function_tool(
@@ -424,9 +440,6 @@ TOOLS = [
                 ]
             }
         },
-        [
-            "search_term"
-        ],
     ),
 
     function_tool(
@@ -437,27 +450,16 @@ TOOLS = [
                 "type": "string"
             }
         },
-        [
-            "app_name"
-        ],
     ),
-
-
-    # ========================================================
-    # FILES
-    # ========================================================
 
     function_tool(
         "list_directory",
-        "List a directory.",
+        "List files and folders.",
         {
             "path": {
                 "type": "string"
             }
         },
-        [
-            "path"
-        ],
     ),
 
     function_tool(
@@ -474,10 +476,6 @@ TOOLS = [
                 ]
             },
         },
-        [
-            "search_term",
-            "root"
-        ],
     ),
 
     function_tool(
@@ -488,9 +486,6 @@ TOOLS = [
                 "type": "string"
             }
         },
-        [
-            "path"
-        ],
     ),
 
     function_tool(
@@ -519,45 +514,33 @@ TOOLS = [
                 ]
             },
         },
-        [
-            "path",
-            "max_chars",
-            "start_page",
-            "end_page"
-        ],
     ),
 
     function_tool(
         "get_path_info",
-        "Get information about a file or folder.",
+        "Get information about a path.",
         {
             "path": {
                 "type": "string"
             }
         },
-        [
-            "path"
-        ],
     ),
 
     function_tool(
         "create_folder",
-        "Create a new folder.",
+        "Create a folder.",
         {
             "path": {
                 "type": "string"
             }
         },
-        [
-            "path"
-        ],
     ),
 
     function_tool(
         "create_text_file",
         (
-            "Create a new UTF-8 text file. "
-            "Existing files are not overwritten."
+            "Create a UTF-8 text file without "
+            "silently overwriting."
         ),
         {
             "path": {
@@ -567,18 +550,11 @@ TOOLS = [
                 "type": "string"
             },
         },
-        [
-            "path",
-            "content"
-        ],
     ),
 
     function_tool(
         "copy_path",
-        (
-            "Copy a file or folder without "
-            "overwriting existing destinations."
-        ),
+        "Copy a file or folder.",
         {
             "source": {
                 "type": "string"
@@ -587,10 +563,6 @@ TOOLS = [
                 "type": "string"
             },
         },
-        [
-            "source",
-            "destination"
-        ],
     ),
 
     function_tool(
@@ -604,10 +576,6 @@ TOOLS = [
                 "type": "string"
             },
         },
-        [
-            "source",
-            "destination"
-        ],
     ),
 
     function_tool(
@@ -621,32 +589,17 @@ TOOLS = [
                 "type": "string"
             },
         },
-        [
-            "path",
-            "new_name"
-        ],
     ),
 
     function_tool(
         "recycle_path",
-        (
-            "Move a file or folder to the "
-            "Windows Recycle Bin."
-        ),
+        "Move a path to the Recycle Bin.",
         {
             "path": {
                 "type": "string"
             }
         },
-        [
-            "path"
-        ],
     ),
-
-
-    # ========================================================
-    # BROWSER
-    # ========================================================
 
     function_tool(
         "browser_open",
@@ -661,22 +614,16 @@ TOOLS = [
                 "type": "string"
             }
         },
-        [
-            "url"
-        ],
     ),
 
     function_tool(
         "browser_search",
-        "Search Google.",
+        "Search the web in Jarvis Chromium.",
         {
             "query": {
                 "type": "string"
             }
         },
-        [
-            "query"
-        ],
     ),
 
     function_tool(
@@ -695,10 +642,6 @@ TOOLS = [
                 "type": "integer"
             },
         },
-        [
-            "max_elements",
-            "max_text_chars"
-        ],
     ),
 
     function_tool(
@@ -709,9 +652,6 @@ TOOLS = [
                 "type": "string"
             }
         },
-        [
-            "ref"
-        ],
     ),
 
     function_tool(
@@ -725,10 +665,6 @@ TOOLS = [
                 "type": "string"
             },
         },
-        [
-            "ref",
-            "text"
-        ],
     ),
 
     function_tool(
@@ -742,35 +678,26 @@ TOOLS = [
                 "type": "string"
             },
         },
-        [
-            "ref",
-            "key"
-        ],
     ),
 
     function_tool(
         "browser_back",
-        "Go back one page."
+        "Go back one webpage."
     ),
 
     function_tool(
         "browser_forward",
-        "Go forward one page."
+        "Go forward one webpage."
     ),
 
     function_tool(
         "browser_reload",
-        "Reload the current webpage."
+        "Reload the webpage."
     ),
-
-
-    # ========================================================
-    # MEMORY
-    # ========================================================
 
     function_tool(
         "memory_store",
-        "Store persistent memory.",
+        "Store persistent local memory.",
         {
             "category": {
                 "type": "string"
@@ -782,11 +709,6 @@ TOOLS = [
                 "type": "string"
             },
         },
-        [
-            "category",
-            "key",
-            "value"
-        ],
     ),
 
     function_tool(
@@ -800,10 +722,6 @@ TOOLS = [
                 "type": "integer"
             },
         },
-        [
-            "query",
-            "limit"
-        ],
     ),
 
     function_tool(
@@ -820,10 +738,6 @@ TOOLS = [
                 "type": "integer"
             },
         },
-        [
-            "category",
-            "limit"
-        ],
     ),
 
     function_tool(
@@ -834,78 +748,61 @@ TOOLS = [
                 "type": "integer"
             }
         },
-        [
-            "memory_id"
-        ],
     ),
-
-
-    # ========================================================
-    # AUDIO / DESKTOP
-    # ========================================================
 
     function_tool(
         "get_audio_status",
-        "Get Windows audio status."
+        "Get master volume and mute state."
     ),
 
     function_tool(
         "set_volume",
-        "Set Windows master volume.",
+        "Set master volume percentage.",
         {
             "percent": {
                 "type": "number"
             }
         },
-        [
-            "percent"
-        ],
     ),
 
     function_tool(
         "change_volume",
-        "Change Windows master volume.",
+        "Increase or decrease volume.",
         {
             "amount": {
                 "type": "number"
             }
         },
-        [
-            "amount"
-        ],
     ),
 
     function_tool(
         "set_mute",
-        "Set Windows mute state.",
+        "Set computer mute state.",
         {
             "muted": {
                 "type": "boolean"
             }
         },
-        [
-            "muted"
-        ],
     ),
 
     function_tool(
         "media_play_pause",
-        "Play or pause media."
+        "Play or pause current media."
     ),
 
     function_tool(
         "media_next",
-        "Next media track."
+        "Skip to next track."
     ),
 
     function_tool(
         "media_previous",
-        "Previous media track."
+        "Return to previous track."
     ),
 
     function_tool(
         "media_stop",
-        "Stop media."
+        "Stop current media."
     ),
 
     function_tool(
@@ -921,9 +818,6 @@ TOOLS = [
                 "type": "string"
             }
         },
-        [
-            "text"
-        ],
     ),
 
     function_tool(
@@ -943,15 +837,12 @@ TOOLS = [
 
     function_tool(
         "focus_window",
-        "Bring a window to the foreground.",
+        "Bring a window to front.",
         {
             "title_query": {
                 "type": "string"
             }
         },
-        [
-            "title_query"
-        ],
     ),
 
     function_tool(
@@ -962,9 +853,6 @@ TOOLS = [
                 "type": "string"
             }
         },
-        [
-            "title_query"
-        ],
     ),
 
     function_tool(
@@ -975,9 +863,6 @@ TOOLS = [
                 "type": "string"
             }
         },
-        [
-            "title_query"
-        ],
     ),
 
     function_tool(
@@ -988,9 +873,6 @@ TOOLS = [
                 "type": "string"
             }
         },
-        [
-            "title_query"
-        ],
     ),
 
     function_tool(
@@ -1004,20 +886,11 @@ TOOLS = [
                 "type": "string"
             },
         },
-        [
-            "title",
-            "message"
-        ],
     ),
-
-
-    # ========================================================
-    # SCHEDULER
-    # ========================================================
 
     function_tool(
         "get_local_datetime",
-        "Get exact local computer time."
+        "Get current local computer date/time."
     ),
 
     function_tool(
@@ -1031,10 +904,6 @@ TOOLS = [
                 "type": "string"
             },
         },
-        [
-            "seconds",
-            "message"
-        ],
     ),
 
     function_tool(
@@ -1051,11 +920,6 @@ TOOLS = [
                 "type": "string"
             },
         },
-        [
-            "local_datetime",
-            "message",
-            "title"
-        ],
     ),
 
     function_tool(
@@ -1069,10 +933,6 @@ TOOLS = [
                 "type": "integer"
             },
         },
-        [
-            "include_completed",
-            "limit"
-        ],
     ),
 
     function_tool(
@@ -1083,19 +943,11 @@ TOOLS = [
                 "type": "integer"
             }
         },
-        [
-            "task_id"
-        ],
     ),
-
-
-    # ========================================================
-    # PROCESS / NETWORK / ADMIN
-    # ========================================================
 
     function_tool(
         "list_processes",
-        "List running Windows processes.",
+        "List running processes.",
         {
             "search_term": {
                 "type": [
@@ -1107,31 +959,21 @@ TOOLS = [
                 "type": "integer"
             },
         },
-        [
-            "search_term",
-            "limit"
-        ],
     ),
 
     function_tool(
         "get_process_info",
-        "Get process information by PID.",
+        "Get information about a PID.",
         {
             "pid": {
                 "type": "integer"
             }
         },
-        [
-            "pid"
-        ],
     ),
 
     function_tool(
         "terminate_process",
-        (
-            "Terminate a process. "
-            "Requires local user confirmation."
-        ),
+        "Terminate a process after confirmation.",
         {
             "pid": {
                 "type": "integer"
@@ -1140,15 +982,11 @@ TOOLS = [
                 "type": "boolean"
             },
         },
-        [
-            "pid",
-            "force"
-        ],
     ),
 
     function_tool(
         "get_machine_info",
-        "Get local machine information."
+        "Get machine information."
     ),
 
     function_tool(
@@ -1158,28 +996,22 @@ TOOLS = [
 
     function_tool(
         "get_wifi_info",
-        "Get current Wi-Fi information."
+        "Get Wi-Fi information."
     ),
 
     function_tool(
         "get_active_connections",
-        "List active network connections.",
+        "Get active network connections.",
         {
             "limit": {
                 "type": "integer"
             }
         },
-        [
-            "limit"
-        ],
     ),
 
     function_tool(
         "run_powershell",
-        (
-            "Run PowerShell. "
-            "Requires explicit local confirmation."
-        ),
+        "Run PowerShell after confirmation.",
         {
             "command": {
                 "type": "string"
@@ -1188,18 +1020,13 @@ TOOLS = [
                 "type": "integer"
             },
         },
-        [
-            "command",
-            "timeout"
-        ],
     ),
 
     function_tool(
         "power_action",
         (
-            "Lock, shutdown, restart, sign out, "
-            "or sleep the computer. "
-            "Requires explicit confirmation."
+            "Lock, sleep, restart, shut down, "
+            "or sign out after confirmation."
         ),
         {
             "action": {
@@ -1209,13 +1036,10 @@ TOOLS = [
                     "shutdown",
                     "restart",
                     "signout",
-                    "sleep"
+                    "sleep",
                 ]
             }
         },
-        [
-            "action"
-        ],
     ),
 ]
 
@@ -1225,86 +1049,488 @@ TOOLS = [
 # ============================================================
 
 INSTRUCTIONS = """
-You are JARVIS, a personal AI assistant running on the user's
-Windows computer.
+You are JARVIS, a capable personal AI assistant running on the
+user's Windows computer.
 
-Be concise for simple commands.
+Be concise for simple commands and natural in conversation.
 
-Use tools whenever real computer state or a computer action
-is required.
+Use tools whenever real computer state or an action is required.
 
-Prefer the cheapest and most direct reliable route.
+Prefer structured tools over screen/mouse automation.
+
+Do not call unnecessary tools.
 
 FILES
 
-Use filesystem tools for reading, searching, creating, moving,
-copying and renaming files.
+Use filesystem tools for files and folders.
+Do not silently overwrite files.
+Use recycle_path instead of permanent deletion.
 
-Ordinary file operations refuse silent overwrites.
+PROCESSES / ADMIN
 
-recycle_path moves files/folders to the Windows Recycle Bin
-instead of permanently deleting them.
+Identify uncertain PIDs before termination.
 
-Direct writes to Windows and Program Files are intentionally
-blocked. Deliberate system-level modifications should use
-run_powershell.
-
-PROCESSES
-
-If the process PID is uncertain, identify it first using
-list_processes.
-
-terminate_process is confirmation-gated.
-
-POWERSHELL / POWER
-
-run_powershell, terminate_process and power_action are handled
+terminate_process, run_powershell and power_action are protected
 by a local confirmation broker.
 
-When one returns requires_confirmation=true, clearly describe
-what is pending and tell the user to say:
+If a protected operation returns requires_confirmation=true,
+explain what is pending and tell the user to say "Confirm" or
+"Cancel".
 
-"Confirm"
-
-or:
-
-"Cancel"
-
-Do not claim the action happened before confirmation.
+Do not claim the operation occurred before confirmation.
 
 TIME
 
 Use schedule_timer for relative timers.
-
-Use get_local_datetime and schedule_reminder_at for specific
-clock times and dates.
+For exact clock times, get the current local time when needed and
+then use schedule_reminder_at.
 
 MEMORY
 
-Use memory_store when the user explicitly asks you to remember
-something useful long-term.
+Use memory_store when the user explicitly asks to remember
+something durable.
 
-Never store passwords, API keys, tokens, card information,
-recovery codes or other credentials.
+Use memory_search when a question may depend on information from
+a previous Jarvis session.
+
+Never store passwords, tokens, API keys, recovery codes or payment
+credentials.
 
 BROWSER
 
-Prefer Playwright browser tools for ordinary websites.
+Prefer browser DOM tools over screen-coordinate automation.
 
 Do not automatically enter passwords.
 
 Do not autonomously confirm purchases, financial transactions,
 account deletion, or other high-consequence irreversible actions.
 
-WINDOWS
+GENERAL
 
-Prefer structured/local tools before screen-coordinate automation.
-
-Only use screen vision and mouse/keyboard automation when a
-structured tool cannot accomplish the task.
-
-Never claim an action succeeded unless the tool result says it did.
+Never invent computer state.
+Never claim an action succeeded unless its tool result indicates
+success.
 """
+
+
+# ============================================================
+# DIRECT TOOL EXECUTORS
+# ============================================================
+
+EXECUTORS = {
+
+    "get_system_status":
+        lambda a:
+            get_system_status(),
+
+    "get_top_processes":
+        lambda a:
+            get_top_processes(),
+
+    "get_user_paths":
+        lambda a:
+            get_user_paths(),
+
+    "get_screen_info":
+        lambda a:
+            get_screen_info(),
+
+    "analyze_screen":
+        lambda a:
+            analyze_screen(
+                a["question"]
+            ),
+
+    "move_mouse":
+        lambda a:
+            move_mouse(
+                a["x"],
+                a["y"],
+                a["duration"]
+            ),
+
+    "click_mouse":
+        lambda a:
+            click_mouse(
+                a["x"],
+                a["y"],
+                a["button"],
+                a["clicks"]
+            ),
+
+    "scroll_mouse":
+        lambda a:
+            scroll_mouse(
+                a["amount"]
+            ),
+
+    "type_text":
+        lambda a:
+            type_text(
+                a["text"],
+                a["interval"]
+            ),
+
+    "press_key":
+        lambda a:
+            press_key(
+                a["key"],
+                a["presses"]
+            ),
+
+    "press_hotkey":
+        lambda a:
+            press_hotkey(
+                a["keys"]
+            ),
+
+    "list_applications":
+        lambda a:
+            list_applications(
+                a["search_term"]
+            ),
+
+    "open_application":
+        lambda a:
+            open_application(
+                a["app_name"]
+            ),
+
+    "list_directory":
+        lambda a:
+            list_directory(
+                a["path"]
+            ),
+
+    "find_files":
+        lambda a:
+            find_files(
+                a["search_term"],
+                a["root"]
+            ),
+
+    "open_file":
+        lambda a:
+            open_file(
+                a["path"]
+            ),
+
+    "read_file":
+        lambda a:
+            read_file(
+                a["path"],
+                a["max_chars"],
+                a["start_page"],
+                a["end_page"],
+            ),
+
+    "get_path_info":
+        lambda a:
+            get_path_info(
+                a["path"]
+            ),
+
+    "create_folder":
+        lambda a:
+            create_folder(
+                a["path"]
+            ),
+
+    "create_text_file":
+        lambda a:
+            create_text_file(
+                a["path"],
+                a["content"]
+            ),
+
+    "copy_path":
+        lambda a:
+            copy_path(
+                a["source"],
+                a["destination"]
+            ),
+
+    "move_path":
+        lambda a:
+            move_path(
+                a["source"],
+                a["destination"]
+            ),
+
+    "rename_path":
+        lambda a:
+            rename_path(
+                a["path"],
+                a["new_name"]
+            ),
+
+    "recycle_path":
+        lambda a:
+            recycle_path(
+                a["path"]
+            ),
+
+    "browser_open":
+        lambda a:
+            browser_open(),
+
+    "browser_navigate":
+        lambda a:
+            browser_navigate(
+                a["url"]
+            ),
+
+    "browser_search":
+        lambda a:
+            browser_search(
+                a["query"]
+            ),
+
+    "browser_current_page":
+        lambda a:
+            browser_current_page(),
+
+    "browser_inspect":
+        lambda a:
+            browser_inspect(
+                a["max_elements"],
+                a["max_text_chars"]
+            ),
+
+    "browser_click":
+        lambda a:
+            browser_click(
+                a["ref"]
+            ),
+
+    "browser_fill":
+        lambda a:
+            browser_fill(
+                a["ref"],
+                a["text"]
+            ),
+
+    "browser_press":
+        lambda a:
+            browser_press(
+                a["ref"],
+                a["key"]
+            ),
+
+    "browser_back":
+        lambda a:
+            browser_back(),
+
+    "browser_forward":
+        lambda a:
+            browser_forward(),
+
+    "browser_reload":
+        lambda a:
+            browser_reload(),
+
+    "memory_store":
+        lambda a:
+            memory_store(
+                a["category"],
+                a["key"],
+                a["value"]
+            ),
+
+    "memory_search":
+        lambda a:
+            memory_search(
+                a["query"],
+                a["limit"]
+            ),
+
+    "memory_list":
+        lambda a:
+            memory_list(
+                a["category"],
+                a["limit"]
+            ),
+
+    "memory_delete":
+        lambda a:
+            memory_delete(
+                a["memory_id"]
+            ),
+
+    "get_audio_status":
+        lambda a:
+            get_audio_status(),
+
+    "set_volume":
+        lambda a:
+            set_volume(
+                a["percent"]
+            ),
+
+    "change_volume":
+        lambda a:
+            change_volume(
+                a["amount"]
+            ),
+
+    "set_mute":
+        lambda a:
+            set_mute(
+                a["muted"]
+            ),
+
+    "media_play_pause":
+        lambda a:
+            media_play_pause(),
+
+    "media_next":
+        lambda a:
+            media_next(),
+
+    "media_previous":
+        lambda a:
+            media_previous(),
+
+    "media_stop":
+        lambda a:
+            media_stop(),
+
+    "get_clipboard":
+        lambda a:
+            get_clipboard(),
+
+    "set_clipboard":
+        lambda a:
+            set_clipboard(
+                a["text"]
+            ),
+
+    "clear_clipboard":
+        lambda a:
+            clear_clipboard(),
+
+    "list_windows":
+        lambda a:
+            list_windows(),
+
+    "get_active_window":
+        lambda a:
+            get_active_window(),
+
+    "focus_window":
+        lambda a:
+            focus_window(
+                a["title_query"]
+            ),
+
+    "minimize_window":
+        lambda a:
+            minimize_window(
+                a["title_query"]
+            ),
+
+    "maximize_window":
+        lambda a:
+            maximize_window(
+                a["title_query"]
+            ),
+
+    "restore_window":
+        lambda a:
+            restore_window(
+                a["title_query"]
+            ),
+
+    "show_notification":
+        lambda a:
+            show_notification(
+                a["title"],
+                a["message"]
+            ),
+
+    "get_local_datetime":
+        lambda a:
+            get_local_datetime(),
+
+    "schedule_timer":
+        lambda a:
+            schedule_timer(
+                a["seconds"],
+                a["message"]
+            ),
+
+    "schedule_reminder_at":
+        lambda a:
+            schedule_reminder_at(
+                a["local_datetime"],
+                a["message"],
+                a["title"]
+            ),
+
+    "list_scheduled_tasks":
+        lambda a:
+            list_scheduled_tasks(
+                a["include_completed"],
+                a["limit"]
+            ),
+
+    "cancel_scheduled_task":
+        lambda a:
+            cancel_scheduled_task(
+                a["task_id"]
+            ),
+
+    "list_processes":
+        lambda a:
+            list_processes(
+                a["search_term"],
+                a["limit"]
+            ),
+
+    "get_process_info":
+        lambda a:
+            get_process_info(
+                a["pid"]
+            ),
+
+    "terminate_process":
+        lambda a:
+            terminate_process(
+                a["pid"],
+                a["force"]
+            ),
+
+    "get_machine_info":
+        lambda a:
+            get_machine_info(),
+
+    "get_network_info":
+        lambda a:
+            get_network_info(),
+
+    "get_wifi_info":
+        lambda a:
+            get_wifi_info(),
+
+    "get_active_connections":
+        lambda a:
+            get_active_connections(
+                a["limit"]
+            ),
+
+    "run_powershell":
+        lambda a:
+            run_powershell(
+                a["command"],
+                a["timeout"]
+            ),
+
+    "power_action":
+        lambda a:
+            power_action(
+                a["action"]
+            ),
+}
 
 
 # ============================================================
@@ -1321,36 +1547,32 @@ pending_action = None
 
 
 def confirmation_description(
-    tool_name,
-    arguments
+    name,
+    args
 ):
+    if name == "terminate_process":
 
-    if tool_name == "terminate_process":
-
-        mode = (
+        return (
             "force kill"
-            if arguments.get(
+            if args.get(
                 "force"
             )
             else "terminate"
+        ) + (
+            f" process PID "
+            f"{args.get('pid')}"
         )
 
-        return (
-            f"{mode} process PID "
-            f"{arguments.get('pid')}"
-        )
-
-    if tool_name == "run_powershell":
+    if name == "run_powershell":
 
         command = str(
-            arguments.get(
+            args.get(
                 "command",
                 ""
             )
         )
 
         if len(command) > 180:
-
             command = (
                 command[:180]
                 + "..."
@@ -1361,31 +1583,33 @@ def confirmation_description(
             f"{command}"
         )
 
-    if tool_name == "power_action":
+    if name == "power_action":
 
         return (
-            f"{arguments.get('action')} "
-            f"the Windows session/computer"
+            f"{args.get('action')} "
+            f"the computer/session"
         )
 
-    return tool_name
+    return name
 
 
 def queue_confirmation(
-    tool_name,
-    arguments
+    name,
+    args
 ):
-
     global pending_action
 
     pending_action = {
-        "tool_name": tool_name,
-        "arguments": arguments,
-        "created_at": time.time(),
+        "tool_name":
+            name,
+        "arguments":
+            args,
+        "created_at":
+            time.time(),
         "description":
             confirmation_description(
-                tool_name,
-                arguments
+                name,
+                args
             ),
     }
 
@@ -1399,33 +1623,22 @@ def queue_confirmation(
             ],
         "expires_in_seconds":
             CONFIRMATION_TIMEOUT_SECONDS,
-        "message": (
-            "The user must explicitly "
-            "say Confirm before this "
-            "action executes."
-        ),
     }
 
 
-def get_valid_pending_action():
-
+def get_pending():
     global pending_action
 
     if pending_action is None:
         return None
 
-    age = (
+    if (
         time.time()
         - pending_action[
             "created_at"
         ]
-    )
-
-    if (
-        age
         > CONFIRMATION_TIMEOUT_SECONDS
     ):
-
         pending_action = None
 
         return None
@@ -1433,515 +1646,108 @@ def get_valid_pending_action():
     return pending_action
 
 
-def clear_pending_action():
-
+def clear_pending():
     global pending_action
 
     pending_action = None
 
 
-# ============================================================
-# TOOL EXECUTION
-# ============================================================
-
-def execute_tool_direct(
+def execute_direct(
     name,
-    a
+    args
 ):
-
-    no_args = {
-
-        "get_system_status":
-            get_system_status,
-
-        "get_top_processes":
-            get_top_processes,
-
-        "get_user_paths":
-            get_user_paths,
-
-        "get_screen_info":
-            get_screen_info,
-
-        "browser_open":
-            browser_open,
-
-        "browser_current_page":
-            browser_current_page,
-
-        "browser_back":
-            browser_back,
-
-        "browser_forward":
-            browser_forward,
-
-        "browser_reload":
-            browser_reload,
-
-        "get_audio_status":
-            get_audio_status,
-
-        "media_play_pause":
-            media_play_pause,
-
-        "media_next":
-            media_next,
-
-        "media_previous":
-            media_previous,
-
-        "media_stop":
-            media_stop,
-
-        "get_clipboard":
-            get_clipboard,
-
-        "clear_clipboard":
-            clear_clipboard,
-
-        "list_windows":
-            list_windows,
-
-        "get_active_window":
-            get_active_window,
-
-        "get_local_datetime":
-            get_local_datetime,
-
-        "get_machine_info":
-            get_machine_info,
-
-        "get_network_info":
-            get_network_info,
-
-        "get_wifi_info":
-            get_wifi_info,
-    }
-
-    if name in no_args:
-
-        return (
-            no_args[
-                name
-            ]()
-        )
-
-
-    if name == "analyze_screen":
-
-        return analyze_screen(
-            a["question"]
-        )
-
-
-    if name == "move_mouse":
-
-        return move_mouse(
-            a["x"],
-            a["y"],
-            a["duration"]
-        )
-
-
-    if name == "click_mouse":
-
-        return click_mouse(
-            a["x"],
-            a["y"],
-            a["button"],
-            a["clicks"]
-        )
-
-
-    if name == "scroll_mouse":
-
-        return scroll_mouse(
-            a["amount"]
-        )
-
-
-    if name == "type_text":
-
-        return type_text(
-            a["text"],
-            a["interval"]
-        )
-
-
-    if name == "press_key":
-
-        return press_key(
-            a["key"],
-            a["presses"]
-        )
-
-
-    if name == "press_hotkey":
-
-        return press_hotkey(
-            a["keys"]
-        )
-
-
-    if name == "list_applications":
-
-        return list_applications(
-            a["search_term"]
-        )
-
-
-    if name == "open_application":
-
-        return open_application(
-            a["app_name"]
-        )
-
-
-    if name == "list_directory":
-
-        return list_directory(
-            a["path"]
-        )
-
-
-    if name == "find_files":
-
-        return find_files(
-            a["search_term"],
-            a["root"]
-        )
-
-
-    if name == "open_file":
-
-        return open_file(
-            a["path"]
-        )
-
-
-    if name == "read_file":
-
-        return read_file(
-            a["path"],
-            a["max_chars"],
-            a["start_page"],
-            a["end_page"]
-        )
-
-
-    if name == "get_path_info":
-
-        return get_path_info(
-            a["path"]
-        )
-
-
-    if name == "create_folder":
-
-        return create_folder(
-            a["path"]
-        )
-
-
-    if name == "create_text_file":
-
-        return create_text_file(
-            a["path"],
-            a["content"]
-        )
-
-
-    if name == "copy_path":
-
-        return copy_path(
-            a["source"],
-            a["destination"]
-        )
-
-
-    if name == "move_path":
-
-        return move_path(
-            a["source"],
-            a["destination"]
-        )
-
-
-    if name == "rename_path":
-
-        return rename_path(
-            a["path"],
-            a["new_name"]
-        )
-
-
-    if name == "recycle_path":
-
-        return recycle_path(
-            a["path"]
-        )
-
-
-    if name == "browser_navigate":
-
-        return browser_navigate(
-            a["url"]
-        )
-
-
-    if name == "browser_search":
-
-        return browser_search(
-            a["query"]
-        )
-
-
-    if name == "browser_inspect":
-
-        return browser_inspect(
-            a["max_elements"],
-            a["max_text_chars"]
-        )
-
-
-    if name == "browser_click":
-
-        return browser_click(
-            a["ref"]
-        )
-
-
-    if name == "browser_fill":
-
-        return browser_fill(
-            a["ref"],
-            a["text"]
-        )
-
-
-    if name == "browser_press":
-
-        return browser_press(
-            a["ref"],
-            a["key"]
-        )
-
-
-    if name == "memory_store":
-
-        return memory_store(
-            a["category"],
-            a["key"],
-            a["value"]
-        )
-
-
-    if name == "memory_search":
-
-        return memory_search(
-            a["query"],
-            a["limit"]
-        )
-
-
-    if name == "memory_list":
-
-        return memory_list(
-            a["category"],
-            a["limit"]
-        )
-
-
-    if name == "memory_delete":
-
-        return memory_delete(
-            a["memory_id"]
-        )
-
-
-    if name == "set_volume":
-
-        return set_volume(
-            a["percent"]
-        )
-
-
-    if name == "change_volume":
-
-        return change_volume(
-            a["amount"]
-        )
-
-
-    if name == "set_mute":
-
-        return set_mute(
-            a["muted"]
-        )
-
-
-    if name == "set_clipboard":
-
-        return set_clipboard(
-            a["text"]
-        )
-
-
-    if name == "focus_window":
-
-        return focus_window(
-            a["title_query"]
-        )
-
-
-    if name == "minimize_window":
-
-        return minimize_window(
-            a["title_query"]
-        )
-
-
-    if name == "maximize_window":
-
-        return maximize_window(
-            a["title_query"]
-        )
-
-
-    if name == "restore_window":
-
-        return restore_window(
-            a["title_query"]
-        )
-
-
-    if name == "show_notification":
-
-        return show_notification(
-            a["title"],
-            a["message"]
-        )
-
-
-    if name == "schedule_timer":
-
-        return schedule_timer(
-            a["seconds"],
-            a["message"]
-        )
-
-
-    if name == "schedule_reminder_at":
-
-        return schedule_reminder_at(
-            a["local_datetime"],
-            a["message"],
-            a["title"]
-        )
-
-
-    if name == "list_scheduled_tasks":
-
-        return list_scheduled_tasks(
-            a["include_completed"],
-            a["limit"]
-        )
-
-
-    if name == "cancel_scheduled_task":
-
-        return cancel_scheduled_task(
-            a["task_id"]
-        )
-
-
-    if name == "list_processes":
-
-        return list_processes(
-            a["search_term"],
-            a["limit"]
-        )
-
-
-    if name == "get_process_info":
-
-        return get_process_info(
-            a["pid"]
-        )
-
-
-    if name == "terminate_process":
-
-        return terminate_process(
-            a["pid"],
-            a["force"]
-        )
-
-
-    if name == "get_active_connections":
-
-        return get_active_connections(
-            a["limit"]
-        )
-
-
-    if name == "run_powershell":
-
-        return run_powershell(
-            a["command"],
-            a["timeout"]
-        )
-
-
-    if name == "power_action":
-
-        return power_action(
-            a["action"]
-        )
-
-
-    return {
-        "success": False,
-        "error": (
-            f"Unknown tool: {name}"
-        ),
-    }
+    executor = EXECUTORS.get(
+        name
+    )
+
+    if executor is None:
+
+        return {
+            "success": False,
+            "error": (
+                f"Unknown tool: {name}"
+            ),
+        }
+
+    return executor(
+        args
+    )
 
 
 def execute_tool(
     name,
-    arguments
+    args
 ):
-
     if name in RISKY_TOOLS:
 
         return queue_confirmation(
             name,
-            arguments
+            args
         )
 
-    return execute_tool_direct(
+    return execute_direct(
         name,
-        arguments
+        args
     )
 
 
 # ============================================================
-# OPENAI LOOP
+# MODEL / OPENAI LOOP
 # ============================================================
+
+def create_response(
+    model,
+    effort,
+    **kwargs
+):
+    response = (
+        client.responses.create(
+            model=model,
+            reasoning={
+                "effort":
+                    effort
+            },
+            prompt_cache_key=(
+                PROMPT_CACHE_KEY
+            ),
+            **kwargs
+        )
+    )
+
+    return response
+
 
 def run_jarvis(
     user_input,
     previous_response_id
 ):
-
     try:
+        route = route_model(
+            user_input
+        )
+
+        model = route[
+            "model"
+        ]
+
+        effort = route[
+            "effort"
+        ]
+
+        print(
+            f"[MODEL: "
+            f"{route['display']} | "
+            f"{route['source']} | "
+            f"{route['reason']}]"
+        )
 
         request = {
-            "model": MODEL,
-            "instructions": INSTRUCTIONS,
-            "tools": TOOLS,
-            "input": user_input,
+            "instructions":
+                INSTRUCTIONS,
+            "tools":
+                TOOLS,
+            "input":
+                user_input,
         }
 
         if previous_response_id:
@@ -1950,10 +1756,41 @@ def run_jarvis(
                 "previous_response_id"
             ] = previous_response_id
 
-        response = (
-            client.responses.create(
-                **request
+        try:
+            response = (
+                create_response(
+                    model,
+                    effort,
+                    **request
+                )
             )
+
+        except Exception:
+            # If a cross-model previous response ever
+            # causes a compatibility issue, recover
+            # instead of breaking Jarvis.
+            if previous_response_id:
+
+                request.pop(
+                    "previous_response_id",
+                    None
+                )
+
+                response = (
+                    create_response(
+                        model,
+                        effort,
+                        **request
+                    )
+                )
+
+            else:
+                raise
+
+        record_response(
+            response,
+            model,
+            purpose="assistant",
         )
 
         while True:
@@ -1974,6 +1811,10 @@ def run_jarvis(
                         response.output_text,
                     "response_id":
                         response.id,
+                    "model":
+                        route[
+                            "display"
+                        ],
                 }
 
             outputs = []
@@ -1986,7 +1827,6 @@ def run_jarvis(
                 )
 
                 try:
-
                     args = json.loads(
                         call.arguments
                     )
@@ -2001,8 +1841,10 @@ def run_jarvis(
                 except Exception as e:
 
                     result = {
-                        "success": False,
-                        "error": str(e),
+                        "success":
+                            False,
+                        "error":
+                            str(e),
                     }
 
                 outputs.append({
@@ -2018,15 +1860,24 @@ def run_jarvis(
                 })
 
             response = (
-                client.responses.create(
-                    model=MODEL,
-                    instructions=INSTRUCTIONS,
+                create_response(
+                    model,
+                    effort,
+                    instructions=(
+                        INSTRUCTIONS
+                    ),
                     tools=TOOLS,
                     previous_response_id=(
                         response.id
                     ),
                     input=outputs,
                 )
+            )
+
+            record_response(
+                response,
+                model,
+                purpose="tool_followup",
             )
 
     except Exception as e:
@@ -2041,8 +1892,9 @@ def run_jarvis(
 # SPEECH
 # ============================================================
 
-def speak_response(text):
-
+def speak_response(
+    text
+):
     text = str(
         text
     ).strip()
@@ -2061,42 +1913,36 @@ def speak_response(text):
 
         return
 
-    shortened = (
-        text[
-            :VOICE_RESPONSE_MAX_CHARS
-        ]
-    )
+    text = text[
+        :VOICE_RESPONSE_MAX_CHARS
+    ]
 
-    space = shortened.rfind(
+    space = text.rfind(
         " "
     )
 
     if space > 500:
-
-        shortened = (
-            shortened[:space]
-        )
+        text = text[
+            :space
+        ]
 
     speak(
-        shortened
+        text
         + ". The rest is in the log."
     )
 
 
 # ============================================================
-# LOCAL FAST COMMANDS
+# ZERO-COST LOCAL COMMANDS
 # ============================================================
 
-def seconds_from_unit(
+def _seconds(
     amount,
     unit
 ):
-
     amount = float(
         amount
     )
-
-    unit = unit.lower()
 
     if unit.startswith(
         "second"
@@ -2110,24 +1956,73 @@ def seconds_from_unit(
             amount * 60
         )
 
-    if unit.startswith(
-        "hour"
-    ):
-        return (
-            amount * 3600
-        )
-
-    return None
+    return (
+        amount * 3600
+    )
 
 
-def local_fast_command(text):
-
+def local_fast_command(
+    text
+):
     raw = str(
         text
     ).strip()
 
-    command = raw.lower()
+    command = (
+        raw.lower()
+        .strip(".?!")
+    )
 
+
+    # API COST
+
+    if command in {
+        "/cost",
+        "api cost",
+        "api usage",
+        "how much have i spent",
+        "how much has jarvis cost",
+        "what has jarvis cost",
+    }:
+
+        return {
+            "handled": True,
+            "response":
+                format_cost_summary(
+                    30
+                ),
+        }
+
+
+    # ROUTER STATUS
+
+    if command in {
+        "/router",
+        "router status",
+        "what model are you using",
+        "what ai model are you using",
+    }:
+
+        status = router_status()
+
+        ollama = status[
+            "ollama"
+        ]
+
+        return {
+            "handled": True,
+            "response": (
+                f"Model mode is "
+                f"{status['override']}. "
+                f"Local Ollama router is "
+                f"{'online' if ollama.get('available') else 'offline'}. "
+                f"The default cloud model "
+                f"is GPT-5.6 Luna."
+            ),
+        }
+
+
+    # VOLUME
 
     match = re.fullmatch(
         r"(?:set\s+)?(?:the\s+)?"
@@ -2161,8 +2056,8 @@ def local_fast_command(text):
 
     if command in {
         "volume up",
-        "turn it up",
         "louder",
+        "turn it up",
         "increase volume",
     }:
 
@@ -2176,21 +2071,14 @@ def local_fast_command(text):
                 f"Volume "
                 f"{result.get('volume_percent', '')} "
                 f"percent."
-                if result.get(
-                    "success"
-                )
-                else (
-                    "I couldn't change "
-                    "the volume."
-                )
             ),
         }
 
 
     if command in {
         "volume down",
-        "turn it down",
         "quieter",
+        "turn it down",
         "decrease volume",
     }:
 
@@ -2204,13 +2092,6 @@ def local_fast_command(text):
                 f"Volume "
                 f"{result.get('volume_percent', '')} "
                 f"percent."
-                if result.get(
-                    "success"
-                )
-                else (
-                    "I couldn't change "
-                    "the volume."
-                )
             ),
         }
 
@@ -2247,6 +2128,8 @@ def local_fast_command(text):
         }
 
 
+    # MEDIA
+
     if command in {
         "pause",
         "pause music",
@@ -2254,6 +2137,7 @@ def local_fast_command(text):
         "play",
         "play music",
         "resume",
+        "resume music",
     }:
 
         media_play_pause()
@@ -2294,6 +2178,8 @@ def local_fast_command(text):
         }
 
 
+    # TIMER
+
     match = re.fullmatch(
         r"(?:set\s+)?(?:a\s+)?"
         r"timer(?:\s+for)?\s+"
@@ -2308,12 +2194,12 @@ def local_fast_command(text):
             match.group(1)
         )
 
-        unit = (
-            match.group(2)
+        unit = match.group(
+            2
         )
 
         result = schedule_timer(
-            seconds_from_unit(
+            _seconds(
                 amount,
                 unit
             ),
@@ -2321,7 +2207,7 @@ def local_fast_command(text):
                 f"Your {amount:g} "
                 f"{unit} timer "
                 f"is finished."
-            )
+            ),
         )
 
         if result.get(
@@ -2336,6 +2222,8 @@ def local_fast_command(text):
                 ),
             }
 
+
+    # REMIND ME IN
 
     match = re.fullmatch(
         r"remind me in\s+"
@@ -2352,8 +2240,8 @@ def local_fast_command(text):
             match.group(1)
         )
 
-        unit = (
-            match.group(2)
+        unit = match.group(
+            2
         )
 
         message = (
@@ -2362,11 +2250,11 @@ def local_fast_command(text):
         )
 
         result = schedule_timer(
-            seconds_from_unit(
+            _seconds(
                 amount,
                 unit
             ),
-            message
+            message,
         )
 
         if result.get(
@@ -2391,8 +2279,9 @@ def local_fast_command(text):
 # META COMMANDS
 # ============================================================
 
-def meta_command(text):
-
+def meta_command(
+    text
+):
     command = (
         str(text)
         .strip()
@@ -2402,12 +2291,52 @@ def meta_command(text):
 
 
     if command in {
+        "/auto",
+        "automatic model",
+        "auto model",
+    }:
+        return {
+            "type": "model",
+            "mode": "auto",
+        }
+
+
+    if command in {
+        "/luna",
+        "use luna",
+    }:
+        return {
+            "type": "model",
+            "mode": "luna",
+        }
+
+
+    if command in {
+        "/terra",
+        "use terra",
+    }:
+        return {
+            "type": "model",
+            "mode": "terra",
+        }
+
+
+    if command in {
+        "/sol",
+        "use sol",
+    }:
+        return {
+            "type": "model",
+            "mode": "sol",
+        }
+
+
+    if command in {
         "confirm",
         "yes confirm",
         "confirm it",
         "do it",
     }:
-
         return {
             "type":
                 "confirm_pending"
@@ -2422,7 +2351,6 @@ def meta_command(text):
         "don't do it",
         "do not do it",
     }:
-
         return {
             "type":
                 "cancel_pending"
@@ -2435,7 +2363,6 @@ def meta_command(text):
         "standby mode",
         "go into standby",
     }:
-
         return {
             "type": "mode",
             "mode": "wake",
@@ -2446,7 +2373,6 @@ def meta_command(text):
         "/voice",
         "voice mode",
     }:
-
         return {
             "type": "mode",
             "mode": "voice",
@@ -2458,7 +2384,6 @@ def meta_command(text):
         "text mode",
         "keyboard mode",
     }:
-
         return {
             "type": "mode",
             "mode": "text",
@@ -2469,7 +2394,6 @@ def meta_command(text):
         "/mute",
         "mute yourself",
     }:
-
         return {
             "type":
                 "speech_mute"
@@ -2480,7 +2404,6 @@ def meta_command(text):
         "/unmute",
         "unmute yourself",
     }:
-
         return {
             "type":
                 "speech_unmute"
@@ -2493,7 +2416,6 @@ def meta_command(text):
         "new conversation",
         "reset conversation",
     }:
-
         return {
             "type": "reset"
         }
@@ -2505,7 +2427,6 @@ def meta_command(text):
         "shutdown jarvis",
         "shut down jarvis",
     }:
-
         return {
             "type": "shutdown"
         }
@@ -2528,11 +2449,12 @@ running = True
 
 
 # ============================================================
-# REMINDER CALLBACK
+# REMINDERS
 # ============================================================
 
-def reminder_fired(task):
-
+def reminder_fired(
+    task
+):
     print()
     print(
         f"[REMINDER] "
@@ -2543,7 +2465,6 @@ def reminder_fired(task):
     if voice_output_enabled:
 
         try:
-
             speak(
                 task[
                     "message"
@@ -2579,31 +2500,41 @@ print(
 )
 print()
 
+status = router_status()
+
+print(
+    "Model router: AUTO"
+)
+
+print(
+    "Default AI: GPT-5.6 Luna"
+)
+
+print(
+    "Local Qwen router: "
+    + (
+        "ONLINE"
+        if status[
+            "ollama"
+        ].get(
+            "available"
+        )
+        else "OFFLINE - fallback router active"
+    )
+)
+
+print(
+    "API cost tracking: ENABLED"
+)
+
 print(
     "Wake phrase: Hey Jarvis"
-)
-
-print(
-    "Persistent memory/reminders: ENABLED"
-)
-
-print(
-    "Desktop/browser/file control: ENABLED"
-)
-
-print(
-    "Network/process tools: ENABLED"
-)
-
-print(
-    "Admin confirmation broker: ENABLED"
 )
 
 print()
 
 
 try:
-
     load_wakeword_model()
 
     print(
@@ -2637,15 +2568,12 @@ while running:
             if wake.get(
                 "cancelled"
             ):
-
                 input_mode = "text"
-
                 continue
 
             if not wake.get(
                 "success"
             ):
-
                 continue
 
             result = (
@@ -2655,7 +2583,6 @@ while running:
             if not result.get(
                 "success"
             ):
-
                 continue
 
             user_input = (
@@ -2675,11 +2602,9 @@ while running:
             ).strip()
 
             if typed:
-
                 user_input = typed
 
             else:
-
                 result = (
                     listen_and_transcribe()
                 )
@@ -2687,7 +2612,6 @@ while running:
                 if not result.get(
                     "success"
                 ):
-
                     continue
 
                 user_input = (
@@ -2703,7 +2627,6 @@ while running:
 
 
         if not user_input:
-
             continue
 
 
@@ -2717,16 +2640,46 @@ while running:
 
         if meta:
 
-            action = (
-                meta["type"]
-            )
+            action = meta[
+                "type"
+            ]
 
 
             if action == "shutdown":
 
                 running = False
-
                 break
+
+
+            if action == "model":
+
+                set_model_override(
+                    meta["mode"]
+                )
+
+                previous_response_id = (
+                    None
+                )
+
+                response_text = (
+                    f"Model mode set to "
+                    f"{meta['mode']}."
+                )
+
+                print(
+                    f"JARVIS: "
+                    f"{response_text}"
+                )
+
+                if (
+                    input_mode != "text"
+                    and voice_output_enabled
+                ):
+                    speak(
+                        response_text
+                    )
+
+                continue
 
 
             if action == "mode":
@@ -2775,7 +2728,7 @@ while running:
                     None
                 )
 
-                clear_pending_action()
+                clear_pending()
 
                 print(
                     "Conversation reset."
@@ -2786,9 +2739,7 @@ while running:
 
             if action == "cancel_pending":
 
-                pending = (
-                    get_valid_pending_action()
-                )
+                pending = get_pending()
 
                 if pending:
 
@@ -2798,11 +2749,7 @@ while running:
                         ]
                     )
 
-                    clear_pending_action()
-
-                    previous_response_id = (
-                        None
-                    )
+                    clear_pending()
 
                     response_text = (
                         f"Cancelled: "
@@ -2816,18 +2763,15 @@ while running:
                         "action to cancel."
                     )
 
-                print()
                 print(
                     f"JARVIS: "
                     f"{response_text}"
                 )
-                print()
 
                 if (
                     input_mode != "text"
                     and voice_output_enabled
                 ):
-
                     speak(
                         response_text
                     )
@@ -2837,9 +2781,7 @@ while running:
 
             if action == "confirm_pending":
 
-                pending = (
-                    get_valid_pending_action()
-                )
+                pending = get_pending()
 
                 if not pending:
 
@@ -2851,30 +2793,16 @@ while running:
 
                 else:
 
-                    tool_name = (
-                        pending[
-                            "tool_name"
-                        ]
-                    )
-
-                    args = (
-                        pending[
-                            "arguments"
-                        ]
-                    )
-
-                    description = (
-                        pending[
-                            "description"
-                        ]
-                    )
-
-                    clear_pending_action()
+                    clear_pending()
 
                     result = (
-                        execute_tool_direct(
-                            tool_name,
-                            args
+                        execute_direct(
+                            pending[
+                                "tool_name"
+                            ],
+                            pending[
+                                "arguments"
+                            ],
                         )
                     )
 
@@ -2887,8 +2815,11 @@ while running:
                     ):
 
                         response_text = (
-                            f"Confirmed and executed: "
-                            f"{description}."
+                            "Confirmed and executed: "
+                            + pending[
+                                "description"
+                            ]
+                            + "."
                         )
 
                     else:
@@ -2904,22 +2835,19 @@ while running:
                         )
 
                         response_text = (
-                            f"I tried to execute it, "
-                            f"but it failed: {error}"
+                            f"The confirmed action "
+                            f"failed: {error}"
                         )
 
-                print()
                 print(
                     f"JARVIS: "
                     f"{response_text}"
                 )
-                print()
 
                 if (
                     input_mode != "text"
                     and voice_output_enabled
                 ):
-
                     speak(
                         response_text
                     )
@@ -2928,7 +2856,7 @@ while running:
 
 
         # ====================================================
-        # FREE LOCAL COMMANDS
+        # FREE LOCAL FAST PATH
         # ====================================================
 
         fast = local_fast_command(
@@ -2954,7 +2882,6 @@ while running:
                 input_mode != "text"
                 and voice_output_enabled
             ):
-
                 speak(
                     response_text
                 )
@@ -2985,16 +2912,17 @@ while running:
             continue
 
 
-        response_text = (
-            result["text"]
-        )
-
         previous_response_id = (
             result[
                 "response_id"
             ]
         )
 
+        response_text = (
+            result[
+                "text"
+            ]
+        )
 
         print()
         print(
@@ -3060,7 +2988,6 @@ print(
 if voice_output_enabled:
 
     try:
-
         speak(
             "Shutting down."
         )
