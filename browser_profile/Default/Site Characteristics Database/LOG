@@ -1,2 +1,3 @@
-2026/09/21-23:47:48.636 995c Creating DB C:\Users\anton\Jarvis\browser_profile\Default\Site Characteristics Database since it was missing.
-2026/09/21-23:47:48.669 995c Reusing MANIFEST C:\Users\anton\Jarvis\browser_profile\Default\Site Characteristics Database/MANIFEST-000001
+2026/09/22-02:04:56.024 61dc Reusing MANIFEST C:\Users\anton\Jarvis\browser_profile\Default\Site Characteristics Database/MANIFEST-000001
+2026/09/22-02:04:56.025 61dc Recovering log #3
+2026/09/22-02:04:56.026 61dc Reusing old log C:\Users\anton\Jarvis\browser_profile\Default\Site Characteristics Database/000003.log 

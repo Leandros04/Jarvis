@@ -1,2 +1,3 @@
-2026/09/21-23:47:49.505 545c Creating DB C:\Users\anton\Jarvis\browser_profile\Default\Extension State since it was missing.
-2026/09/21-23:47:49.521 545c Reusing MANIFEST C:\Users\anton\Jarvis\browser_profile\Default\Extension State/MANIFEST-000001
+2026/09/22-02:04:56.943 61dc Reusing MANIFEST C:\Users\anton\Jarvis\browser_profile\Default\Extension State/MANIFEST-000001
+2026/09/22-02:04:56.944 61dc Recovering log #3
+2026/09/22-02:04:56.945 61dc Reusing old log C:\Users\anton\Jarvis\browser_profile\Default\Extension State/000003.log 

@@ -1,2 +1,3 @@
-2026/09/21-23:47:48.541 545c Creating DB C:\Users\anton\Jarvis\browser_profile\Default\Sync Data\LevelDB since it was missing.
-2026/09/21-23:47:48.599 545c Reusing MANIFEST C:\Users\anton\Jarvis\browser_profile\Default\Sync Data\LevelDB/MANIFEST-000001
+2026/09/22-02:04:56.004 7c14 Reusing MANIFEST C:\Users\anton\Jarvis\browser_profile\Default\Sync Data\LevelDB/MANIFEST-000001
+2026/09/22-02:04:56.016 7c14 Recovering log #3
+2026/09/22-02:04:56.017 7c14 Reusing old log C:\Users\anton\Jarvis\browser_profile\Default\Sync Data\LevelDB/000003.log 

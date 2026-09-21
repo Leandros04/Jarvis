@@ -1,2 +1,3 @@
-2026/09/21-23:47:49.332 5394 Creating DB C:\Users\anton\Jarvis\browser_profile\Default\shared_proto_db\metadata since it was missing.
-2026/09/21-23:47:49.345 5394 Reusing MANIFEST C:\Users\anton\Jarvis\browser_profile\Default\shared_proto_db\metadata/MANIFEST-000001
+2026/09/22-02:04:56.710 7c14 Reusing MANIFEST C:\Users\anton\Jarvis\browser_profile\Default\shared_proto_db\metadata/MANIFEST-000001
+2026/09/22-02:04:56.722 7c14 Recovering log #3
+2026/09/22-02:04:56.723 7c14 Reusing old log C:\Users\anton\Jarvis\browser_profile\Default\shared_proto_db\metadata/000003.log 
