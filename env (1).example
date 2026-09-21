@@ -1,0 +1,15 @@
+# Required
+OPENAI_API_KEY=
+
+# Optional local model router
+OLLAMA_ROUTER_ENABLED=1
+OLLAMA_ROUTER_MODEL=qwen3.5:0.8b
+OLLAMA_URL=http://127.0.0.1:11434
+
+# Optional first remote SSH node.
+# Leave these blank if you do not use a Raspberry Pi / Linux node.
+JARVIS_DEFAULT_NODE_NAME=
+JARVIS_DEFAULT_NODE_HOST=
+JARVIS_DEFAULT_NODE_USER=
+JARVIS_DEFAULT_NODE_PORT=22
+JARVIS_SSH_IDENTITY=%USERPROFILE%\.ssh\jarvis_ed25519
