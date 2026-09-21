@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -9,8 +10,19 @@ from pathlib import Path
 import pystray
 from PIL import Image, ImageDraw
 
-PROJECT_DIR = Path(__file__).resolve().parent
+
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+PROJECT_DIR = (
+    Path(sys.executable).resolve().parent
+    if IS_FROZEN
+    else Path(__file__).resolve().parent
+)
+
+CORE_EXE = PROJECT_DIR / "JARVIS-Core.exe"
 JARVIS_SCRIPT = PROJECT_DIR / "jarvis.py"
+ENV_FILE = PROJECT_DIR / ".env"
+ENV_EXAMPLE = PROJECT_DIR / ".env.example"
+
 LOG_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOG_DIR / "jarvis.log"
 MAX_LOG_BYTES = 3 * 1024 * 1024
@@ -54,7 +66,9 @@ def rotate_logs():
         return
 
     for index in range(LOG_BACKUPS, 0, -1):
-        source = LOG_DIR / ("jarvis.log" if index == 1 else f"jarvis.log.{index - 1}")
+        source = LOG_DIR / (
+            "jarvis.log" if index == 1 else f"jarvis.log.{index - 1}"
+        )
         destination = LOG_DIR / f"jarvis.log.{index}"
 
         if destination.exists() and index == LOG_BACKUPS:
@@ -87,8 +101,50 @@ def _close_log_handle():
         jarvis_log_handle = None
 
 
+def _ensure_env_file():
+    if ENV_FILE.exists():
+        return
+
+    if ENV_EXAMPLE.exists():
+        try:
+            shutil.copy2(ENV_EXAMPLE, ENV_FILE)
+            write_launcher_log("Created .env from .env.example.")
+        except Exception as e:
+            write_launcher_log(f"Could not create .env: {e}")
+
+
+def _read_env_value(name):
+    if not ENV_FILE.exists():
+        return ""
+
+    try:
+        for raw_line in ENV_FILE.read_text(encoding="utf-8-sig").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == name:
+                return value.strip().strip('"').strip("'")
+    except Exception:
+        pass
+
+    return ""
+
+
+def _configuration_ready():
+    _ensure_env_file()
+    return bool(_read_env_value("OPENAI_API_KEY"))
+
+
 def jarvis_is_running():
     return jarvis_process is not None and jarvis_process.poll() is None
+
+
+def _core_command():
+    if IS_FROZEN:
+        return [str(CORE_EXE)]
+
+    return [str(PYTHONW), "-u", str(JARVIS_SCRIPT)]
 
 
 def start_jarvis(icon=None, item=None, automatic=False):
@@ -102,8 +158,24 @@ def start_jarvis(icon=None, item=None, automatic=False):
                 write_launcher_log("Start requested, but Jarvis is already running.")
             return
 
-        if not JARVIS_SCRIPT.exists():
+        if IS_FROZEN:
+            if not CORE_EXE.exists():
+                write_launcher_log(f"Core executable not found: {CORE_EXE}")
+                return
+        elif not JARVIS_SCRIPT.exists():
             write_launcher_log(f"jarvis.py not found: {JARVIS_SCRIPT}")
+            return
+
+        if not _configuration_ready():
+            write_launcher_log("OPENAI_API_KEY is not configured; core not started.")
+            if icon and not automatic:
+                try:
+                    icon.notify(
+                        "Open Configuration and add OPENAI_API_KEY before starting Jarvis.",
+                        "JARVIS",
+                    )
+                except Exception:
+                    pass
             return
 
         rotate_logs()
@@ -124,7 +196,7 @@ def start_jarvis(icon=None, item=None, automatic=False):
 
         try:
             jarvis_process = subprocess.Popen(
-                [str(PYTHONW), "-u", str(JARVIS_SCRIPT)],
+                _core_command(),
                 cwd=str(PROJECT_DIR),
                 stdin=subprocess.PIPE,
                 stdout=jarvis_log_handle,
@@ -220,21 +292,43 @@ def open_data_folder(icon=None, item=None):
     os.startfile(str(data_dir))
 
 
+def open_configuration(icon=None, item=None):
+    _ensure_env_file()
+    if not ENV_FILE.exists():
+        if icon:
+            try:
+                icon.notify("Could not create .env configuration file.", "JARVIS")
+            except Exception:
+                pass
+        return
+
+    try:
+        os.startfile(str(ENV_FILE))
+    except Exception:
+        subprocess.Popen(["notepad.exe", str(ENV_FILE)])
+
+
 def install_startup(icon=None, item=None):
     try:
         STARTUP_DIR.mkdir(parents=True, exist_ok=True)
 
-        pythonw = str(PYTHONW).replace('"', '""')
-        tray_script = str(Path(__file__).resolve()).replace('"', '""')
-
-        content = (
-            'Set shell = CreateObject("WScript.Shell")\n'
-            'shell.Run """'
-            + pythonw
-            + '"" ""'
-            + tray_script
-            + '""", 0, False\n'
-        )
+        if IS_FROZEN:
+            executable = str(Path(sys.executable).resolve()).replace('"', '""')
+            content = (
+                'Set shell = CreateObject("WScript.Shell")\n'
+                f'shell.Run """{executable}""", 0, False\n'
+            )
+        else:
+            pythonw = str(PYTHONW).replace('"', '""')
+            tray_script = str(Path(__file__).resolve()).replace('"', '""')
+            content = (
+                'Set shell = CreateObject("WScript.Shell")\n'
+                'shell.Run """'
+                + pythonw
+                + '"" ""'
+                + tray_script
+                + '""", 0, False\n'
+            )
 
         STARTUP_FILE.write_text(content, encoding="utf-8")
         write_launcher_log("Windows startup installed.")
@@ -277,7 +371,7 @@ def status_text(item=None):
     if jarvis_is_running():
         return "Status: Running"
     if desired_running:
-        return "Status: Recovering"
+        return "Status: Ready / Not running"
     return "Status: Stopped"
 
 
@@ -311,7 +405,9 @@ def monitor_process(icon):
 
         with process_lock:
             if process is jarvis_process:
-                write_launcher_log(f"Jarvis exited unexpectedly with code {return_code}.")
+                write_launcher_log(
+                    f"Jarvis exited unexpectedly with code {return_code}."
+                )
                 jarvis_process = None
                 _close_log_handle()
 
@@ -350,7 +446,12 @@ def monitor_process(icon):
 
 
 def main():
-    write_launcher_log("Tray application started.")
+    write_launcher_log(
+        "Tray application started "
+        + ("(packaged)." if IS_FROZEN else "(source mode).")
+    )
+
+    _ensure_env_file()
 
     menu = pystray.Menu(
         pystray.MenuItem(status_text, lambda: None, enabled=False),
@@ -359,6 +460,7 @@ def main():
         pystray.MenuItem("Stop Jarvis", stop_jarvis),
         pystray.MenuItem("Restart Jarvis", restart_jarvis),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Open Configuration", open_configuration),
         pystray.MenuItem("Open Log", open_log),
         pystray.MenuItem("Open Jarvis Folder", open_project_folder),
         pystray.MenuItem("Open Data Folder", open_data_folder),

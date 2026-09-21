@@ -1,0 +1,81 @@
+name: Build Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 1.0.0"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Release safety preflight
+        shell: pwsh
+        run: .\preflight_release.ps1
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ inputs.version }}"
+          } else {
+            $version = "${{ github.ref_name }}".TrimStart("v", "V")
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Building JARVIS $version"
+
+      - name: Build portable app and installer
+        shell: pwsh
+        run: .\build_release.ps1 -Version "${{ steps.version.outputs.version }}"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: JARVIS-${{ steps.version.outputs.version }}-windows
+          path: |
+            release/JARVIS-Setup-${{ steps.version.outputs.version }}.exe
+            release/JARVIS-Portable-${{ steps.version.outputs.version }}.zip
+            release/SHA256SUMS.txt
+            release/requirements-lock.txt
+            release/BUILD-INFO.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            "release/JARVIS-Setup-${{ steps.version.outputs.version }}.exe#Windows installer" `
+            "release/JARVIS-Portable-${{ steps.version.outputs.version }}.zip#Portable Windows build" `
+            "release/SHA256SUMS.txt#SHA-256 checksums" `
+            "release/requirements-lock.txt#Resolved Python dependencies" `
+            "release/BUILD-INFO.txt#Build metadata" `
+            --verify-tag `
+            --generate-notes `
+            --title "JARVIS ${{ github.ref_name }}"

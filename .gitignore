@@ -1,1 +1,49 @@
-/.env
+# Secrets / machine-specific configuration
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Runtime state
+data/
+logs/
+screenshots/
+browser_profile/
+*.db
+*.sqlite
+*.sqlite3
+
+# Release/build output
+build/
+dist/
+release/
+*.spec.bak
+packaging/version_info.txt
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# SSH/private keys must never enter this repository
+*.pem
+*.key
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+jarvis_ed25519
+jarvis_ed25519.*
+
+# Misc
+*.log

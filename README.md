@@ -797,3 +797,76 @@ Diagnostics                    complete
 ```
 
 Future work can be treated as optional integrations and refinement rather than fundamental architecture.
+
+
+---
+
+# Windows packages and GitHub Releases
+
+The repository includes a reproducible Windows packaging pipeline.
+
+## Release formats
+
+A release produces:
+
+```text
+JARVIS-Setup-X.Y.Z.exe
+JARVIS-Portable-X.Y.Z.zip
+SHA256SUMS.txt
+requirements-lock.txt
+BUILD-INFO.txt
+```
+
+The **installer `.exe`** is the recommended download for normal users. The
+portable ZIP contains a one-folder application with `JARVIS.exe` as its tray
+launcher and `JARVIS-Core.exe` as the background core.
+
+Users of these packaged builds do **not** need Python installed.
+
+## Build locally
+
+First run the secret/runtime-data preflight:
+
+```powershell
+.\preflight_release.ps1
+```
+
+Then, on Windows, install Inno Setup 6 or 7 and run:
+
+```powershell
+.\build_release.ps1 -Version 1.0.0
+```
+
+The output is written to `release\`.
+
+See [RELEASING.md](RELEASING.md) for the full release procedure.
+
+## Publish automatically with GitHub Actions
+
+Push a semantic version tag:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The `Build Windows release` workflow builds the application on a Windows GitHub
+runner and creates a GitHub Release automatically.
+
+## First run of an installed build
+
+The installer deliberately does **not** contain `.env` or any private key.
+
+On the first launch, the tray app creates `.env` from `.env.example`. Open the
+tray menu and choose **Open Configuration**, then add the user's API key and
+restart JARVIS.
+
+Optional Ollama and SSH features are configured separately on each user's
+machine.
+
+## SmartScreen
+
+Public unsigned Windows executables can trigger Microsoft Defender SmartScreen.
+That does not mean the application failed to package correctly. For polished
+wide distribution, sign `JARVIS.exe`, `JARVIS-Core.exe`, and the installer with
+an Authenticode code-signing certificate.
