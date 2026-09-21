@@ -6,6 +6,10 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+# Load .env before importing local modules that read configuration at import time.
+load_dotenv()
+
 from openai import OpenAI
 
 from system_tools import (
@@ -51,13 +55,17 @@ from routine_tools import (
 )
 from ai_router import route_model, router_status, set_model_override
 from cost_tracker import record_response, format_cost_summary
+from health_tools import (
+    get_health_snapshot, run_diagnostics, format_health_summary,
+    format_diagnostics_summary, set_monitor_enabled, get_health_settings,
+    ProactiveMonitor, unload_ollama_model,
+)
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 VOICE_RESPONSE_MAX_CHARS = 1200
@@ -334,6 +342,14 @@ TOOLS = [
         "action": {"type": "string", "enum": ["lock", "shutdown", "restart", "signout", "sleep"]},
     }),
 
+    # HEALTH / DIAGNOSTICS
+    function_tool("get_health_snapshot", "Get a local CPU, RAM, disk, battery and Jarvis-process health snapshot."),
+    function_tool("run_diagnostics", "Run local Jarvis installation diagnostics, including configured SSH nodes.", {
+        "check_remote": {"type": "boolean"},
+    }),
+    function_tool("get_health_settings", "Get proactive health-monitor settings."),
+    function_tool("unload_ollama_model", "Unload the local Ollama router model from RAM."),
+
     # REMOTE NODES
     function_tool("remote_node_list", "List configured SSH remote nodes."),
     function_tool("remote_node_status", "Get read-only status from a configured SSH node.", {
@@ -416,6 +432,7 @@ ROUTINE_SAFE_TOOLS = {
     "remote_list_directory", "remote_read_file", "remote_upload",
     "remote_download", "list_directory", "find_files", "read_file",
     "get_path_info", "create_folder", "copy_path", "move_path", "rename_path",
+    "get_health_snapshot",
 }
 
 def save_routine_checked(name, description, steps):
@@ -463,6 +480,13 @@ Store durable information only when useful or explicitly requested. Never store 
 
 BROWSER
 Prefer DOM browser tools. Never automatically enter passwords or confirm purchases, financial transactions, account deletion, or other high-consequence irreversible actions.
+
+HEALTH / RELIABILITY
+- get_health_snapshot is read-only and cheap.
+- run_diagnostics checks project files, dependencies, OpenAI configuration, Ollama, logs, local resources and configured SSH nodes.
+- Proactive monitoring runs locally and should warn about sustained high CPU, high RAM, low disk space, and low battery.
+- On critical RAM pressure, Jarvis may unload the tiny Ollama router model to protect an 8 GB system.
+- Do not pretend a diagnostic passed when it returned issues.
 
 GENERAL
 Never invent computer state. Never claim success unless a tool result indicates success.
@@ -545,6 +569,10 @@ EXECUTORS = {
     "get_active_connections": lambda a: get_active_connections(a["limit"]),
     "run_powershell": lambda a: run_powershell(a["command"], a["timeout"]),
     "power_action": lambda a: power_action(a["action"]),
+    "get_health_snapshot": lambda a: get_health_snapshot(),
+    "run_diagnostics": lambda a: run_diagnostics(check_remote=a["check_remote"]),
+    "get_health_settings": lambda a: get_health_settings(),
+    "unload_ollama_model": lambda a: unload_ollama_model(),
     "remote_node_list": lambda a: node_list(),
     "remote_node_status": lambda a: node_status(a["name"]),
     "remote_node_add": lambda a: node_add(a["name"], a["host"], a["username"], a["port"], a["identity_file"]),
@@ -827,6 +855,25 @@ def local_fast_command(text):
     raw = str(text).strip()
     command = raw.lower().strip(".?!")
 
+    if command in {"/health", "health", "health status", "system health", "jarvis health"}:
+        return {"handled": True, "response": format_health_summary()}
+
+    if command in {"/diagnostics", "diagnostics", "run diagnostics", "jarvis diagnostics"}:
+        result = run_diagnostics(check_remote=True)
+        return {"handled": True, "response": format_diagnostics_summary(result)}
+
+    if command in {"/monitor on", "monitor on", "enable monitoring", "enable health monitoring"}:
+        result = set_monitor_enabled(True)
+        return {"handled": True, "response": "Proactive health monitoring enabled." if result.get("success") else "I couldn't enable health monitoring."}
+
+    if command in {"/monitor off", "monitor off", "disable monitoring", "disable health monitoring"}:
+        result = set_monitor_enabled(False)
+        return {"handled": True, "response": "Proactive health monitoring disabled." if result.get("success") else "I couldn't disable health monitoring."}
+
+    if command in {"free memory", "free some memory", "unload ollama", "unload the local model"}:
+        result = unload_ollama_model()
+        return {"handled": True, "response": "The local Ollama router has been unloaded from RAM." if result.get("success") else "I couldn't unload the Ollama router."}
+
     if command in {"/cost", "api cost", "api usage", "how much has jarvis cost", "how much have i spent"}:
         return {"handled": True, "response": format_cost_summary(30)}
 
@@ -991,6 +1038,30 @@ scheduler = JarvisScheduler(reminder_callback=reminder_fired)
 scheduler.start()
 
 
+def health_alert(alert):
+    title = alert.get("title", "JARVIS health")
+    message = alert.get("message", "Health warning")
+    level = alert.get("level", "warning")
+
+    print(f"\n[PROACTIVE {level.upper()}] {message}\n")
+
+    try:
+        show_notification(title, message)
+    except Exception:
+        pass
+
+    # Speak only critical alerts so normal warnings stay unobtrusive.
+    if level == "critical" and voice_output_enabled:
+        try:
+            speak(message)
+        except Exception:
+            pass
+
+
+health_monitor = ProactiveMonitor(alert_callback=health_alert)
+health_monitor.start()
+
+
 # ============================================================
 # STARTUP
 # ============================================================
@@ -1005,6 +1076,8 @@ print("Local Qwen router: " + ("ONLINE" if status["ollama"].get("available") els
 print("Remote nodes: ENABLED")
 print("Reusable routines: ENABLED")
 print("API cost tracking: ENABLED")
+print("Proactive health monitor: ENABLED")
+print("Crash recovery/log rotation: managed by tray_app.py")
 print("Wake phrase: Hey Jarvis\n")
 
 try:
@@ -1153,6 +1226,7 @@ while running:
 # ============================================================
 
 scheduler.stop()
+health_monitor.stop()
 try:
     browser_close()
 except Exception:

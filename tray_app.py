@@ -9,17 +9,12 @@ from pathlib import Path
 import pystray
 from PIL import Image, ImageDraw
 
-
-# ============================================================
-# PATHS
-# ============================================================
-
 PROJECT_DIR = Path(__file__).resolve().parent
-
 JARVIS_SCRIPT = PROJECT_DIR / "jarvis.py"
-
 LOG_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOG_DIR / "jarvis.log"
+MAX_LOG_BYTES = 3 * 1024 * 1024
+LOG_BACKUPS = 3
 
 STARTUP_DIR = (
     Path(os.environ["APPDATA"])
@@ -29,630 +24,367 @@ STARTUP_DIR = (
     / "Programs"
     / "Startup"
 )
-
 STARTUP_FILE = STARTUP_DIR / "JarvisAssistant.vbs"
 
-
-# ============================================================
-# PYTHON EXECUTABLE
-# ============================================================
-
 CURRENT_PYTHON = Path(sys.executable)
-
-PYTHONW = CURRENT_PYTHON.with_name(
-    "pythonw.exe"
-)
-
+PYTHONW = CURRENT_PYTHON.with_name("pythonw.exe")
 if not PYTHONW.exists():
     PYTHONW = CURRENT_PYTHON
 
-
-# ============================================================
-# PROCESS STATE
-# ============================================================
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 jarvis_process = None
-process_lock = threading.Lock()
+jarvis_log_handle = None
+process_lock = threading.RLock()
+desired_running = True
+shutting_down = False
+restart_history = []
+RESTART_WINDOW_SECONDS = 600
+MAX_AUTOMATIC_RESTARTS = 5
 
 
-# ============================================================
-# LOGGING
-# ============================================================
+def _timestamp():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def rotate_logs():
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not LOG_FILE.exists() or LOG_FILE.stat().st_size < MAX_LOG_BYTES:
+        return
+
+    for index in range(LOG_BACKUPS, 0, -1):
+        source = LOG_DIR / ("jarvis.log" if index == 1 else f"jarvis.log.{index - 1}")
+        destination = LOG_DIR / f"jarvis.log.{index}"
+
+        if destination.exists() and index == LOG_BACKUPS:
+            try:
+                destination.unlink()
+            except Exception:
+                pass
+
+        if source.exists():
+            try:
+                source.replace(destination)
+            except Exception:
+                pass
+
 
 def write_launcher_log(text):
-    LOG_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    timestamp = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-    with open(
-        LOG_FILE,
-        "a",
-        encoding="utf-8"
-    ) as file:
-
-        file.write(
-            f"[{timestamp}] "
-            f"[TRAY] {text}\n"
-        )
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LOG_FILE, "a", encoding="utf-8") as file:
+        file.write(f"[{_timestamp()}] [TRAY] {text}\n")
 
 
-# ============================================================
-# JARVIS PROCESS MANAGEMENT
-# ============================================================
+def _close_log_handle():
+    global jarvis_log_handle
+    if jarvis_log_handle is not None:
+        try:
+            jarvis_log_handle.flush()
+            jarvis_log_handle.close()
+        except Exception:
+            pass
+        jarvis_log_handle = None
+
 
 def jarvis_is_running():
-    global jarvis_process
-
-    return (
-        jarvis_process is not None
-        and jarvis_process.poll() is None
-    )
+    return jarvis_process is not None and jarvis_process.poll() is None
 
 
-def start_jarvis(icon=None, item=None):
-    global jarvis_process
+def start_jarvis(icon=None, item=None, automatic=False):
+    global jarvis_process, jarvis_log_handle, desired_running
 
     with process_lock:
+        desired_running = True
 
         if jarvis_is_running():
-
-            write_launcher_log(
-                "Start requested, but Jarvis "
-                "is already running."
-            )
-
-            if icon:
-                try:
-                    icon.notify(
-                        "Jarvis is already running.",
-                        "JARVIS"
-                    )
-                except Exception:
-                    pass
-
+            if not automatic:
+                write_launcher_log("Start requested, but Jarvis is already running.")
             return
 
         if not JARVIS_SCRIPT.exists():
-
-            write_launcher_log(
-                f"jarvis.py not found: "
-                f"{JARVIS_SCRIPT}"
-            )
-
+            write_launcher_log(f"jarvis.py not found: {JARVIS_SCRIPT}")
             return
 
-        LOG_DIR.mkdir(
-            parents=True,
-            exist_ok=True
-        )
+        rotate_logs()
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _close_log_handle()
 
-        log_handle = open(
+        jarvis_log_handle = open(
             LOG_FILE,
             "a",
             encoding="utf-8",
             buffering=1,
         )
-
-        separator = (
-            "\n\n"
-            "========================================\n"
+        jarvis_log_handle.write(
+            "\n\n========================================\n"
             f"JARVIS START: {datetime.now()}\n"
             "========================================\n"
         )
 
-        log_handle.write(
-            separator
-        )
-
-        creation_flags = 0
-
-        if os.name == "nt":
-            creation_flags = (
-                subprocess.CREATE_NO_WINDOW
-            )
-
         try:
-
             jarvis_process = subprocess.Popen(
-                [
-                    str(PYTHONW),
-                    "-u",
-                    str(JARVIS_SCRIPT),
-                ],
+                [str(PYTHONW), "-u", str(JARVIS_SCRIPT)],
                 cwd=str(PROJECT_DIR),
-
-                # Keep stdin open. Jarvis normally
-                # stays in wake mode and does not use it.
                 stdin=subprocess.PIPE,
-
-                stdout=log_handle,
+                stdout=jarvis_log_handle,
                 stderr=subprocess.STDOUT,
-
                 text=True,
-                creationflags=creation_flags,
+                creationflags=CREATE_NO_WINDOW,
             )
+            write_launcher_log(f"Jarvis started. PID={jarvis_process.pid}")
 
-            write_launcher_log(
-                f"Jarvis started. "
-                f"PID={jarvis_process.pid}"
-            )
-
-            if icon:
+            if icon and not automatic:
                 try:
-                    icon.notify(
-                        "Jarvis is now listening.",
-                        "JARVIS"
-                    )
+                    icon.notify("Jarvis is now listening.", "JARVIS")
                 except Exception:
                     pass
 
         except Exception as e:
+            write_launcher_log(f"Failed to start Jarvis: {e}")
+            jarvis_process = None
+            _close_log_handle()
 
-            write_launcher_log(
-                f"Failed to start Jarvis: {e}"
+
+def _terminate_jarvis_process():
+    global jarvis_process
+
+    if not jarvis_is_running():
+        jarvis_process = None
+        _close_log_handle()
+        return
+
+    pid = jarvis_process.pid
+    write_launcher_log(f"Stopping Jarvis PID={pid}")
+
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW,
+                timeout=10,
             )
-
+        else:
+            jarvis_process.terminate()
             try:
-                log_handle.close()
-            except Exception:
-                pass
+                jarvis_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                jarvis_process.kill()
+    except Exception as e:
+        write_launcher_log(f"Error while stopping Jarvis: {e}")
+
+    jarvis_process = None
+    _close_log_handle()
 
 
 def stop_jarvis(icon=None, item=None):
-    global jarvis_process
-
+    global desired_running
     with process_lock:
+        desired_running = False
+        _terminate_jarvis_process()
+        write_launcher_log("Jarvis stopped by user.")
 
-        if not jarvis_is_running():
-
-            jarvis_process = None
-
-            write_launcher_log(
-                "Stop requested, but Jarvis "
-                "was not running."
-            )
-
-            return
-
-        pid = jarvis_process.pid
-
-        write_launcher_log(
-            f"Stopping Jarvis PID={pid}"
-        )
-
+    if icon:
         try:
-
-            if os.name == "nt":
-
-                subprocess.run(
-                    [
-                        "taskkill",
-                        "/PID",
-                        str(pid),
-                        "/T",
-                        "/F",
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=(
-                        subprocess.CREATE_NO_WINDOW
-                    ),
-                )
-
-            else:
-
-                jarvis_process.terminate()
-
-                try:
-                    jarvis_process.wait(
-                        timeout=5
-                    )
-
-                except subprocess.TimeoutExpired:
-                    jarvis_process.kill()
-
-        except Exception as e:
-
-            write_launcher_log(
-                f"Error while stopping: {e}"
-            )
-
-        jarvis_process = None
-
-        write_launcher_log(
-            "Jarvis stopped."
-        )
-
-        if icon:
-            try:
-                icon.notify(
-                    "Jarvis stopped.",
-                    "JARVIS"
-                )
-            except Exception:
-                pass
+            icon.notify("Jarvis stopped.", "JARVIS")
+        except Exception:
+            pass
 
 
-def restart_jarvis(
-    icon=None,
-    item=None
-):
-    stop_jarvis()
+def restart_jarvis(icon=None, item=None):
+    global desired_running
+    with process_lock:
+        desired_running = True
+        _terminate_jarvis_process()
 
-    time.sleep(
-        0.8
-    )
-
-    start_jarvis(
-        icon
-    )
+    time.sleep(0.7)
+    start_jarvis(icon)
 
 
-# ============================================================
-# FILE / FOLDER ACTIONS
-# ============================================================
-
-def open_log(
-    icon=None,
-    item=None
-):
-    LOG_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
+def open_log(icon=None, item=None):
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
     if not LOG_FILE.exists():
-
-        LOG_FILE.write_text(
-            "Jarvis log\n",
-            encoding="utf-8"
-        )
-
-    os.startfile(
-        str(LOG_FILE)
-    )
+        LOG_FILE.write_text("Jarvis log\n", encoding="utf-8")
+    os.startfile(str(LOG_FILE))
 
 
-def open_project_folder(
-    icon=None,
-    item=None
-):
-    os.startfile(
-        str(PROJECT_DIR)
-    )
+def open_project_folder(icon=None, item=None):
+    os.startfile(str(PROJECT_DIR))
 
 
-# ============================================================
-# WINDOWS STARTUP
-# ============================================================
+def open_data_folder(icon=None, item=None):
+    data_dir = Path.home() / "Jarvis" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    os.startfile(str(data_dir))
 
-def install_startup(
-    icon=None,
-    item=None
-):
+
+def install_startup(icon=None, item=None):
     try:
+        STARTUP_DIR.mkdir(parents=True, exist_ok=True)
 
-        STARTUP_DIR.mkdir(
-            parents=True,
-            exist_ok=True
-        )
-
-        # VBS lets Windows start the tray app
-        # invisibly, without a console window.
-        pythonw = str(
-            PYTHONW
-        ).replace(
-            '"',
-            '""'
-        )
-
-        tray_script = str(
-            Path(__file__).resolve()
-        ).replace(
-            '"',
-            '""'
-        )
+        pythonw = str(PYTHONW).replace('"', '""')
+        tray_script = str(Path(__file__).resolve()).replace('"', '""')
 
         content = (
-            'Set shell = '
-            'CreateObject("WScript.Shell")\n'
-            'shell.Run '
-            '"""'
+            'Set shell = CreateObject("WScript.Shell")\n'
+            'shell.Run """'
             + pythonw
             + '"" ""'
             + tray_script
             + '""", 0, False\n'
         )
 
-        STARTUP_FILE.write_text(
-            content,
-            encoding="utf-8"
-        )
-
-        write_launcher_log(
-            "Windows startup installed."
-        )
+        STARTUP_FILE.write_text(content, encoding="utf-8")
+        write_launcher_log("Windows startup installed.")
 
         if icon:
             try:
-                icon.notify(
-                    "Jarvis will now start "
-                    "automatically with Windows.",
-                    "JARVIS"
-                )
+                icon.notify("Jarvis will start automatically with Windows.", "JARVIS")
             except Exception:
                 pass
-
     except Exception as e:
-
-        write_launcher_log(
-            f"Startup installation failed: {e}"
-        )
+        write_launcher_log(f"Startup installation failed: {e}")
 
 
-def remove_startup(
-    icon=None,
-    item=None
-):
+def remove_startup(icon=None, item=None):
     try:
-
         if STARTUP_FILE.exists():
             STARTUP_FILE.unlink()
-
-        write_launcher_log(
-            "Windows startup removed."
-        )
+        write_launcher_log("Windows startup removed.")
 
         if icon:
             try:
-                icon.notify(
-                    "Automatic Windows startup removed.",
-                    "JARVIS"
-                )
+                icon.notify("Automatic Windows startup removed.", "JARVIS")
             except Exception:
                 pass
-
     except Exception as e:
+        write_launcher_log(f"Could not remove startup: {e}")
 
-        write_launcher_log(
-            f"Could not remove startup: {e}"
-        )
-
-
-# ============================================================
-# TRAY ICON
-# ============================================================
 
 def create_icon_image():
-
     size = 64
-
-    image = Image.new(
-        "RGB",
-        (
-            size,
-            size
-        ),
-        "black"
-    )
-
-    draw = ImageDraw.Draw(
-        image
-    )
-
-    # Minimal J icon
-    draw.ellipse(
-        (
-            4,
-            4,
-            60,
-            60
-        ),
-        outline="white",
-        width=3,
-    )
-
-    draw.line(
-        (
-            38,
-            17,
-            38,
-            41
-        ),
-        fill="white",
-        width=6,
-    )
-
-    draw.arc(
-        (
-            18,
-            27,
-            40,
-            50
-        ),
-        start=0,
-        end=180,
-        fill="white",
-        width=6,
-    )
-
+    image = Image.new("RGB", (size, size), "black")
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((4, 4, 60, 60), outline="white", width=3)
+    draw.line((38, 17, 38, 41), fill="white", width=6)
+    draw.arc((18, 27, 40, 50), start=0, end=180, fill="white", width=6)
     return image
 
 
-# ============================================================
-# MENU STATUS
-# ============================================================
-
 def status_text(item=None):
-
     if jarvis_is_running():
         return "Status: Running"
-
+    if desired_running:
+        return "Status: Recovering"
     return "Status: Stopped"
 
 
-# ============================================================
-# EXIT
-# ============================================================
+def exit_tray(icon, item=None):
+    global shutting_down, desired_running
+    shutting_down = True
+    desired_running = False
+    write_launcher_log("Tray application exiting.")
 
-def exit_tray(
-    icon,
-    item=None
-):
-    write_launcher_log(
-        "Tray application exiting."
-    )
-
-    stop_jarvis()
+    with process_lock:
+        _terminate_jarvis_process()
 
     icon.stop()
 
 
-# ============================================================
-# HEALTH WATCHER
-# ============================================================
-
 def monitor_process(icon):
+    global jarvis_process, desired_running, restart_history
 
-    global jarvis_process
+    while not shutting_down:
+        time.sleep(2)
 
-    while True:
+        with process_lock:
+            process = jarvis_process
 
-        time.sleep(
-            3
-        )
+        if process is None:
+            continue
 
-        try:
+        return_code = process.poll()
+        if return_code is None:
+            continue
 
-            if jarvis_process is None:
-                continue
+        with process_lock:
+            if process is jarvis_process:
+                write_launcher_log(f"Jarvis exited unexpectedly with code {return_code}.")
+                jarvis_process = None
+                _close_log_handle()
 
-            return_code = (
-                jarvis_process.poll()
-            )
+        if not desired_running or shutting_down:
+            continue
 
-            if return_code is None:
-                continue
+        now = time.time()
+        restart_history = [
+            stamp for stamp in restart_history
+            if now - stamp <= RESTART_WINDOW_SECONDS
+        ]
 
-            write_launcher_log(
-                f"Jarvis exited unexpectedly "
-                f"with code {return_code}."
-            )
-
-            jarvis_process = None
-
+        if len(restart_history) >= MAX_AUTOMATIC_RESTARTS:
+            desired_running = False
+            write_launcher_log("Automatic restart disabled after repeated crashes.")
             try:
                 icon.notify(
-                    "Jarvis stopped unexpectedly. "
-                    "Use Restart Jarvis from the tray.",
-                    "JARVIS"
+                    "Jarvis crashed repeatedly and automatic recovery was stopped. Open the log, then use Restart Jarvis.",
+                    "JARVIS",
                 )
             except Exception:
                 pass
+            continue
 
-        except Exception as e:
+        restart_history.append(now)
+        delay = min(2 * len(restart_history), 12)
+        write_launcher_log(f"Automatic recovery scheduled in {delay} seconds.")
+        time.sleep(delay)
 
-            write_launcher_log(
-                f"Monitor error: {e}"
-            )
+        if desired_running and not shutting_down:
+            start_jarvis(icon, automatic=True)
+            try:
+                icon.notify("Jarvis recovered from an unexpected exit.", "JARVIS")
+            except Exception:
+                pass
 
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
-
-    write_launcher_log(
-        "Tray application started."
-    )
-
-    image = create_icon_image()
+    write_launcher_log("Tray application started.")
 
     menu = pystray.Menu(
-
-        pystray.MenuItem(
-            status_text,
-            lambda: None,
-            enabled=False,
-        ),
-
+        pystray.MenuItem(status_text, lambda: None, enabled=False),
         pystray.Menu.SEPARATOR,
-
-        pystray.MenuItem(
-            "Start Jarvis",
-            start_jarvis,
-        ),
-
-        pystray.MenuItem(
-            "Stop Jarvis",
-            stop_jarvis,
-        ),
-
-        pystray.MenuItem(
-            "Restart Jarvis",
-            restart_jarvis,
-        ),
-
+        pystray.MenuItem("Start Jarvis", start_jarvis),
+        pystray.MenuItem("Stop Jarvis", stop_jarvis),
+        pystray.MenuItem("Restart Jarvis", restart_jarvis),
         pystray.Menu.SEPARATOR,
-
-        pystray.MenuItem(
-            "Open Log",
-            open_log,
-        ),
-
-        pystray.MenuItem(
-            "Open Jarvis Folder",
-            open_project_folder,
-        ),
-
+        pystray.MenuItem("Open Log", open_log),
+        pystray.MenuItem("Open Jarvis Folder", open_project_folder),
+        pystray.MenuItem("Open Data Folder", open_data_folder),
         pystray.Menu.SEPARATOR,
-
-        pystray.MenuItem(
-            "Start with Windows",
-            install_startup,
-        ),
-
-        pystray.MenuItem(
-            "Remove Windows Startup",
-            remove_startup,
-        ),
-
+        pystray.MenuItem("Start with Windows", install_startup),
+        pystray.MenuItem("Remove Windows Startup", remove_startup),
         pystray.Menu.SEPARATOR,
-
-        pystray.MenuItem(
-            "Exit Jarvis",
-            exit_tray,
-        ),
+        pystray.MenuItem("Exit Jarvis", exit_tray),
     )
 
     icon = pystray.Icon(
         "jarvis",
-        image,
+        create_icon_image(),
         "JARVIS",
         menu,
     )
 
-    # Start Jarvis automatically whenever
-    # the tray application itself starts.
-    start_jarvis(
-        icon
-    )
+    start_jarvis(icon)
 
-    monitor_thread = threading.Thread(
+    watcher = threading.Thread(
         target=monitor_process,
-        args=(
-            icon,
-        ),
+        args=(icon,),
         daemon=True,
+        name="JarvisTrayWatchdog",
     )
-
-    monitor_thread.start()
+    watcher.start()
 
     icon.run()
 

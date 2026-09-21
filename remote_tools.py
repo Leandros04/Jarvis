@@ -8,7 +8,21 @@ from pathlib import Path
 
 DB_PATH = Path.home() / "Jarvis" / "data" / "nodes.db"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-DEFAULT_IDENTITY = Path.home() / ".ssh" / "jarvis_ed25519"
+DEFAULT_IDENTITY = Path(
+    os.path.expandvars(
+        os.path.expanduser(
+            os.getenv(
+                "JARVIS_SSH_IDENTITY",
+                str(Path.home() / ".ssh" / "jarvis_ed25519"),
+            )
+        )
+    )
+).resolve(strict=False)
+
+DEFAULT_NODE_NAME = os.getenv("JARVIS_DEFAULT_NODE_NAME", "").strip()
+DEFAULT_NODE_HOST = os.getenv("JARVIS_DEFAULT_NODE_HOST", "").strip()
+DEFAULT_NODE_USER = os.getenv("JARVIS_DEFAULT_NODE_USER", "").strip()
+DEFAULT_NODE_PORT = int(os.getenv("JARVIS_DEFAULT_NODE_PORT", "22") or 22)
 
 
 def _connect():
@@ -35,28 +49,31 @@ def init_remote_db():
             )
             """
         )
-        existing = conn.execute(
-            "SELECT id FROM nodes WHERE lower(name)=lower(?)",
-            ("leandros-pi",),
-        ).fetchone()
-        if not existing:
-            now = time.time()
-            conn.execute(
-                """
-                INSERT INTO nodes
-                (name, host, username, port, identity_file, enabled, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (
-                    "leandros-pi",
-                    "leandros-pi",
-                    "lendis",
-                    22,
-                    str(DEFAULT_IDENTITY),
-                    now,
-                    now,
-                ),
-            )
+        # Optional first-run node configured through .env. Existing databases
+        # are never overwritten unless node_add is explicitly called.
+        if DEFAULT_NODE_NAME and DEFAULT_NODE_HOST and DEFAULT_NODE_USER:
+            existing = conn.execute(
+                "SELECT id FROM nodes WHERE lower(name)=lower(?)",
+                (DEFAULT_NODE_NAME,),
+            ).fetchone()
+            if not existing:
+                now = time.time()
+                conn.execute(
+                    """
+                    INSERT INTO nodes
+                    (name, host, username, port, identity_file, enabled, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        DEFAULT_NODE_NAME,
+                        DEFAULT_NODE_HOST,
+                        DEFAULT_NODE_USER,
+                        DEFAULT_NODE_PORT,
+                        str(DEFAULT_IDENTITY),
+                        now,
+                        now,
+                    ),
+                )
     return {"success": True, "database": str(DB_PATH)}
 
 
@@ -214,8 +231,9 @@ def _run_ssh(node, command, timeout=30):
         "stdout": stdout[:50000],
         "stderr": stderr[:30000],
         "password_fallback": (
-            "If key authentication fails, manual `ssh leandros-pi` can still use the password. "
-            "Background Jarvis does not store or auto-type the password."
+            "If key authentication fails, manual SSH can still fall back to the node password "
+            "when the SSH server allows password authentication. Background Jarvis does not "
+            "store or auto-type the password."
         ),
     }
 
